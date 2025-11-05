@@ -1,0 +1,7 @@
+.netlify
+.env
+.env.local
+.netlify/
+frontend/dist/
+node_modules/
+*/node_modules/

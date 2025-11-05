@@ -1,0 +1,20 @@
+[build]
+  # 1. Chay lenh "build" tu file package.json goc
+  command = "npm run build"
+  
+  # 2. Thu muc publish van la frontend/dist
+  publish = "frontend/dist" 
+
+  [build.environment]
+    NODE_VERSION = "18"
+
+[functions]
+  directory = "backend/functions"
+  node_bundler = "nft"
+
+[dev]
+  # 3. Chay lenh "dev" tu file package.json goc
+  command = "npm run dev --prefix frontend"
+  
+  targetPort = 3000
+  autoLaunch = true

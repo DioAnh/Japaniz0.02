@@ -1,0 +1,7 @@
+{
+  "name": "Luyện phát âm tiếng Nhật",
+  "description": "Một ứng dụng giúp người Việt mới bắt đầu luyện phát âm các từ vựng tiếng Nhật thông dụng hàng ngày bằng công nghệ AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

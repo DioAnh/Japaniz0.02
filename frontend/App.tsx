@@ -335,7 +335,7 @@ const App: React.FC = () => {
 
                 </main>
                 <footer className="text-center mt-6 text-slate-500 text-sm">
-                    <p>Cung cấp bởi Google Gemini API</p>
+                    <p>Google Gemini & ElevenLabs API</p>
                  </footer>
                </div>
         </div>

@@ -5,9 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "comment": "Cac lenh ben duoi se chay script tu thu muc frontend",
     "dev": "npm run dev --prefix frontend",
-    "build": "npm run build --prefix frontend"
+    "comment": "Cai dat dependencies cho ca hai thu muc, sau do build frontend",
+    "build": "npm install --prefix frontend && npm install --prefix backend && npm run build --prefix frontend"
   },
   "keywords": [],
   "author": "",

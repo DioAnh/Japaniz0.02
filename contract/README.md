@@ -1,0 +1,6 @@
+Minting NFT contract information:
+
+Transaction Digest: Bc9qeKTaUzJPExaBMvU9zbo3DgzFWxqszdDV9SWGm9hX
+Owner: 0xa9008f618a6885e6d5ab99eb1173ddbca23c4368b146ccf3d5f32be1e8181b46
+PackageID: 0xfa078f15e1f310cb59371a29d3da4e4a5f621b9e9e6aa196bff4a9934b866697
+Version: 1 

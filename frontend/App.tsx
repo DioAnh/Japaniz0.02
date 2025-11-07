@@ -1,10 +1,25 @@
-// frontend/App.tsx
+// frontend/App.tsx (Đã cập nhật cho Topic, Sui, và Quiz Mode)
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { VOCABULARY_LIST } from './constants';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import { TOPIC_LIST } from './constants'; 
 import type { VocabularyItem, Feedback, EvaluationResult } from './types';
+import {
+    ConnectButton,
+    useCurrentAccount,
+    useSuiClientQuery,
+    // SỬA: Dùng hook và client mới
+    useSuiClient,
+    useSignTransaction,
+} from '@mysten/dapp-kit';
+// --- THÊM MỚI: Class TransactionBlock của Sui ---
+import { Transaction } from '@mysten/sui/transactions';
+import { bcs } from '@mysten/sui/bcs';
+
+
 
 // --- SVG Icons ---
+// (Giữ nguyên các Icon: SpeakerIcon, MicIcon, NextIcon, PrevIcon)
+// --- (Tôi đã xóa ShuffleIcon theo yêu cầu của bạn) ---
 const SpeakerIcon = ({ className }: { className?: string }) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
@@ -20,8 +35,21 @@ const NextIcon = ({ className }: { className?: string }) => (
         <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
     </svg>
 );
+const PrevIcon = ({ className }: { className?: string }) => (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" />
+    </svg>
+);
+
+// --- THÊM MỚI: Cấu hình Quiz và NFT ---
+// !!! QUAN TRỌNG: Hãy thay thế bằng Package ID của bạn sau khi deploy contract
+const PACKAGE_ID = "0xfa078f15e1f310cb59371a29d3da4e4a5f621b9e9e6aa196bff4a9934b866697"; 
+const QUIZ_TIME_LIMIT = 120; // 120 giây = 2 phút
+const QUIZ_LENGTH = 1; // 10 từ
+// ---
 
 // --- Audio Utility Functions ---
+// (Giữ nguyên: decode, blobToBase64)
 const decode = (base64: string): Uint8Array => {
     const binaryString = atob(base64);
     const len = binaryString.length;
@@ -44,101 +72,196 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
     });
 };
 
+// --- Helper Functions for localStorage ---
+// (Giữ nguyên: getSavedState)
+const getSavedState = () => {
+    const savedTopicIndex = Number(localStorage.getItem('japaniz_topic_index') || 0);
+    const savedWordIndex = Number(localStorage.getItem('japaniz_word_index') || 0);
+    if (savedTopicIndex >= 0 && savedTopicIndex < TOPIC_LIST.length) {
+        if (savedWordIndex >= 0 && savedWordIndex < TOPIC_LIST[savedTopicIndex].vocabulary.length) {
+            return { topicIndex: savedTopicIndex, wordIndex: savedWordIndex };
+        }
+    }
+    return { topicIndex: 0, wordIndex: 0 };
+};
+
+// --- THÊM MỚI: Helper chọn từ ngẫu nhiên ---
+const selectRandomWords = (count: number): VocabularyItem[] => {
+    // 1. Gộp tất cả từ vựng từ mọi topic
+    const allWords = TOPIC_LIST.flatMap(topic => topic.vocabulary);
+    
+    // 2. Xáo trộn danh sách
+    const shuffled = allWords.sort(() => 0.5 - Math.random());
+    
+    // 3. Lấy 10 từ đầu tiên
+    return shuffled.slice(0, count);
+};
+
+
 const App: React.FC = () => {
-    const [score, setScore] = useState(0);
-    const [currentWordIndex, setCurrentWordIndex] = useState(0);
+    // State Luyện tập
+    const [score, setScore] = useState(() => Number(localStorage.getItem('japaniz_score') || 0));
+    const [currentTopicIndex, setCurrentTopicIndex] = useState(getSavedState().topicIndex);
+    const [currentWordInTopicIndex, setCurrentWordInTopicIndex] = useState(getSavedState().wordIndex);
+
+    // State Chung
     const [feedback, setFeedback] = useState<Feedback | null>(null);
     const [isRecording, setIsRecording] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
-    const [showNextButton, setShowNextButton] = useState(false);
-    
+
+    // --- THÊM MỚI: State cho Quiz Mode ---
+    type GameMode = 'practice' | 'quiz' | 'quiz_failed' | 'quiz_passed';
+    const [gameMode, setGameMode] = useState<GameMode>('practice');
+    const [quizWords, setQuizWords] = useState<VocabularyItem[]>([]);
+    const [currentQuizWordIndex, setCurrentQuizWordIndex] = useState(0);
+    const [timeLeft, setTimeLeft] = useState(QUIZ_TIME_LIMIT);
+    // ---
+
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const recordingTimeoutRef = useRef<number | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
-    const isInitialRender = useRef(true);
     
-    const currentWord = VOCABULARY_LIST[currentWordIndex];
+    // --- THÊM MỚI: Hooks của Sui ---
+    const account = useCurrentAccount();
+    const client = useSuiClient(); // Thêm dòng này
+    const { mutateAsync: signTransaction } = useSignTransaction(); // Sửa hook và tên biến
+    
+    // --- SỬA ĐỔI: 'currentWord' giờ phụ thuộc vào gameMode ---
+    const currentWord = useMemo(() => {
+        if (gameMode === 'quiz' || gameMode === 'quiz_failed') {
+            return quizWords[currentQuizWordIndex];
+        }
+        // Mặc định là 'practice' hoặc 'quiz_passed' (hiển thị từ cuối)
+        return TOPIC_LIST[currentTopicIndex].vocabulary[currentWordInTopicIndex];
+    }, [gameMode, quizWords, currentQuizWordIndex, currentTopicIndex, currentWordInTopicIndex]);
+    
+    const currentWordList = TOPIC_LIST[currentTopicIndex].vocabulary;
+    // ---
 
+    // useEffect để lưu state (Giữ nguyên)
+    useEffect(() => {
+        // Chỉ lưu state khi ở chế độ luyện tập
+        if (gameMode === 'practice') {
+            localStorage.setItem('japaniz_topic_index', String(currentTopicIndex));
+            localStorage.setItem('japaniz_word_index', String(currentWordInTopicIndex));
+        }
+    }, [currentTopicIndex, currentWordInTopicIndex, gameMode]);
 
+    useEffect(() => {
+        localStorage.setItem('japaniz_score', String(score));
+    }, [score]);
 
-    const playCurrentWordAudio = useCallback(async () => {
-        // 1. Gọi backend function MỚI
-        const response = await fetch("/.netlify/functions/getElevenLabsTTS", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                textToSpeak: currentWord.hiragana 
-            }),
-        });
-
-        if (!response.ok) {
-            throw new Error("Lỗi gọi API ElevenLabs TTS");
+    // --- THÊM MỚI: useEffect cho đồng hồ đếm ngược Quiz ---
+    useEffect(() => {
+        if (gameMode !== 'quiz' || isProcessing) {
+            return; // Dừng lại nếu không trong quiz hoặc đang xử lý
         }
 
-        // 2. Lấy Base64 MP3 và loại MIME
-        const { base64Audio, mimeType } = await response.json();
+        if (timeLeft <= 0) {
+            // Hết giờ!
+            setFeedback({ type: 'error', message: 'Hết giờ! Bạn đã thua.' });
+            setGameMode('quiz_failed');
+            return;
+        }
 
-        // 3. Chuyển Base64 sang Blob
-        // (Hàm 'decode' ở đầu file của bạn vẫn được giữ lại)
-        const audioData = decode(base64Audio);
-        const audioBlob = new Blob([audioData], { type: mimeType });
-        const audioUrl = URL.createObjectURL(audioBlob);
-        
-        // 4. Phát âm thanh
-        const audio = new Audio(audioUrl);
-        audio.play();
+        const timerId = setInterval(() => {
+            setTimeLeft(prev => prev - 1);
+        }, 1000);
 
-        // 5. Trả về một Promise để các hàm khác (như handlePlayAudio) 
-        // có thể 'await' cho đến khi phát xong.
-        return new Promise<void>((resolve) => {
-            audio.onended = () => {
-                URL.revokeObjectURL(audioUrl); // Dọn dẹp
-                resolve();
-            };
-        });
-    }, [currentWord.hiragana]);
+        // Cleanup function
+        return () => clearInterval(timerId);
+
+    }, [gameMode, timeLeft, isProcessing]);
+    // ---
 
 
+    const playCurrentWordAudio = useCallback(async () => {
+        // (Code giữ nguyên)
+        const response = await fetch("/.netlify/functions/getElevenLabsTTS", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+                textToSpeak: currentWord.hiragana 
+            }),
+        });
+        if (!response.ok) {
+            throw new Error("Lỗi gọi API ElevenLabs TTS");
+        }
+        const { base64Audio, mimeType } = await response.json();
+        const audioData = decode(base64Audio);
+        const audioBlob = new Blob([audioData], { type: mimeType });
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const audio = new Audio(audioUrl);
+        audio.play();
+        return new Promise<void>((resolve) => {
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl); 
+                resolve();
+            };
+        });
+    }, [currentWord]); 
 
-    const handlePlayAudio = useCallback(async () => {
-        if (isProcessing || isRecording) return;
-        setIsProcessing(true);
-        setFeedback({ type: 'info', message: 'Đang phát âm mẫu...' });
-        let hasError = false;
-        try {
-            // Đảm bảo có 'await' ở đây
-            await playCurrentWordAudio(); 
-        } catch (error) {
-            hasError = true;
-            console.error("Error generating TTS:", error);
-            setFeedback({ type: 'error', message: 'Lỗi phát âm. Vui lòng thử lại.' });
-        } finally {
-            if (!hasError) {
+    const handlePlayAudio = useCallback(async () => {
+        // (Code giữ nguyên)
+        if (isProcessing || isRecording) return;
+        setIsProcessing(true);
+        setFeedback({ type: 'info', message: 'Đang phát âm mẫu...' });
+        let hasError = false;
+        try {
+            await playCurrentWordAudio(); 
+        } catch (error) {
+            hasError = true;
+            console.error("Error generating TTS:", error);
+            setFeedback({ type: 'error', message: 'Lỗi phát âm. Vui lòng thử lại.' });
+        } finally {
+            if (!hasError) {
+                setFeedback(null);
+            }
+            setIsProcessing(false);
+        }
+    }, [isProcessing, isRecording, playCurrentWordAudio]);
+
+    const playFeedbackAudio = useCallback(async (text: string) => {
+        // (Code giữ nguyên)
+        if (!text || !text.trim()) return;
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'vi-VN';
+        window.speechSynthesis.speak(utterance);
+        return Promise.resolve();
+    }, []);
+
+
+    // --- THÊM MỚI: Hàm xử lý kết quả Quiz ---
+    const handleQuizAnswer = (isCorrect: boolean) => {
+        if (!isCorrect) {
+            setFeedback({ type: 'incorrect', message: 'Phát âm chưa đúng! Hãy thử lại.' });
+            return; // Cho phép người dùng thử lại từ này
+        }
+
+        // Nếu đúng
+        setFeedback({ type: 'correct', message: 'Chính xác!' });
+
+        const nextWordIndex = currentQuizWordIndex + 1;
+
+        if (nextWordIndex >= QUIZ_LENGTH) {
+            // THẮNG QUIZ!
+            setGameMode('quiz_passed');
+            setFeedback({ type: 'correct', message: 'Chúc mừng! Bạn đã hoàn thành Quiz!' });
+        } else {
+            // Chuyển sang từ tiếp theo
+            setTimeout(() => {
+                setCurrentQuizWordIndex(nextWordIndex);
                 setFeedback(null);
-            }
-            setIsProcessing(false);
+            }, 1500); // Chờ 1.5s rồi chuyển
         }
-    }, [isProcessing, isRecording, playCurrentWordAudio]);
+    };
+    // ---
 
-    // SỬA: Dùng Web Speech API
 
-    const playFeedbackAudio = useCallback(async (text: string) => {
-        if (!text || !text.trim()) return;
-
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'vi-VN';
-        window.speechSynthesis.speak(utterance);
-
-        return Promise.resolve();
-
-    }, []);
-
-// SỬA HÀM NÀY
     const evaluatePronunciation = useCallback(async (audioBase64: string) => {
         setIsProcessing(true);
         setFeedback({ type: 'info', message: 'Đang phân tích phát âm của bạn...' });
-
         try {
             const response = await fetch("/.netlify/functions/evaluatePronunciation", {
                 method: "POST",
@@ -146,45 +269,46 @@ const App: React.FC = () => {
                 body: JSON.stringify({
                     audioBase64: audioBase64,
                     japaneseWord: currentWord.japanese,
-                    hiraganaWord: currentWord.hiragana, 
+                    hiraganaWord: currentWord.hiragana, 
                     romajiWord: currentWord.romaji
                 })
             });
-
             if (!response.ok) {
                 const err = await response.json();
                 throw new Error(err.error || "Lỗi server khi đánh giá");
             }
-
             const result: EvaluationResult = await response.json();
-            
-            const feedbackMessage = result.feedback || (result.isCorrect ? "Rất tốt!" : "Hãy thử lại nhé, bạn có thể làm được!");
 
-            if (result.isCorrect) {
-                setScore(s => s + 10);
-                setFeedback({ type: 'correct', message: feedbackMessage });
-            } else {
-                setFeedback({ type: 'incorrect', message: feedbackMessage });
-            }
-            setShowNextButton(true);
-
-            await playCurrentWordAudio(); 
+            // --- SỬA ĐỔI: Phân luồng logic Practice / Quiz ---
+            if (gameMode === 'practice') {
+                const feedbackMessage = result.feedback || (result.isCorrect ? "Rất tốt!" : "Hãy thử lại nhé, bạn có thể làm được!");
+                if (result.isCorrect) {
+                    setScore(s => s + 10);
+                    setFeedback({ type: 'correct', message: feedbackMessage });
+                } else {
+                    setFeedback({ type: 'incorrect', message: feedbackMessage });
+                }
+                await playCurrentWordAudio(); 
+            } 
+            else if (gameMode === 'quiz') {
+                handleQuizAnswer(result.isCorrect);
+            }
+            // ---
 
         } catch (error) {
             console.error("Lỗi trong quá trình đánh giá:", error);
             const errorMessage = 'Đã xảy ra lỗi phân tích. Vui lòng thử lại.';
             setFeedback({ type: 'error', message: errorMessage });
-            
-            await playFeedbackAudio.catch(audioError => {
-                console.error("Không thể phát âm thanh báo lỗi chung.", audioError);
-            });
-        } finally {
-            setIsProcessing(false);
-        }
-    }, [currentWord, playFeedbackAudio, playCurrentWordAudio]);
-
+            await playFeedbackAudio('Đã xảy ra lỗi').catch(audioError => {
+                console.error("Không thể phát âm thanh báo lỗi chung.", audioError);
+            });
+        } finally {
+            setIsProcessing(false);
+        }
+    }, [currentWord, playFeedbackAudio, playCurrentWordAudio, score, gameMode, currentQuizWordIndex]); // THÊM dependency
 
     const stopRecording = useCallback(() => {
+        // (Code giữ nguyên)
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
             mediaRecorderRef.current.stop();
         }
@@ -198,25 +322,20 @@ const App: React.FC = () => {
     }, []);
 
     const startRecording = useCallback(async () => {
+        // (Code giữ nguyên)
         if (isRecording) return;
-        
         setFeedback({ type: 'info', message: 'Hãy nói và nhấn nút lần nữa để dừng...' });
-        setShowNextButton(false);
         audioChunksRef.current = [];
-
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaStreamRef.current = stream;
-            
             const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
             mediaRecorderRef.current = recorder;
-
             recorder.ondataavailable = (event) => {
                 if (event.data.size > 0) {
                     audioChunksRef.current.push(event.data);
                 }
             };
-
             recorder.onstop = async () => {
                 if (audioChunksRef.current.length === 0) {
                      setFeedback({ type: 'info', message: 'Không nhận được âm thanh. Vui lòng thử lại.' });
@@ -224,17 +343,14 @@ const App: React.FC = () => {
                 }
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 const audioBase64 = await blobToBase64(audioBlob);
-                evaluatePronunciation(audioBase64);
+                evaluatePronunciation(audioBase64);
             };
-
             recorder.start();
             setIsRecording(true);
-
             recordingTimeoutRef.current = window.setTimeout(stopRecording, 5000);
-
         } catch (err) {
             console.error('Error starting recording:', err);
-            setFeedback({ type: 'error', message: 'Không thể truy cập micro. Vui lòng cấp quyền.' });
+            setFeedback({ type: 'error', message: 'Không thể truy cập micro. Vui lòng cấp quyền.' });
             setIsRecording(false);
         }
     }, [isRecording, stopRecording, evaluatePronunciation]);
@@ -245,20 +361,174 @@ const App: React.FC = () => {
         };
     }, [stopRecording]);
 
-    // (Đã vô hiệu hóa useEffect tự động phát)
-
+    // --- Các hàm xử lý của Practice Mode (Giữ nguyên) ---
     const handleNextWord = () => {
-        setShowNextButton(false);
         setFeedback(null);
-        if (currentWordIndex < VOCABULARY_LIST.length - 1) {
-            setCurrentWordIndex(prev => prev + 1);
-        } else {
+        if (currentWordInTopicIndex < currentWordList.length - 1) {
+            setCurrentWordInTopicIndex(prev => prev + 1);
+        } 
+        else if (currentTopicIndex < TOPIC_LIST.length - 1) {
+            setCurrentTopicIndex(prev => prev + 1); 
+            setCurrentWordInTopicIndex(0); 
+        }
+        else {
             setFeedback({ type: 'info', message: `Hoàn thành! Bạn đã đạt ${score} điểm. Bắt đầu lại.` });
-            setCurrentWordIndex(0);
+            setCurrentTopicIndex(0); 
+            setCurrentWordInTopicIndex(0); 
             setScore(0);
         }
     };
-    
+    const handlePrevWord = () => {
+        setFeedback(null);
+        if (currentWordInTopicIndex > 0) {
+            setCurrentWordInTopicIndex(prev => prev - 1);
+        }
+        else if (currentTopicIndex > 0) {
+            const prevTopicIndex = currentTopicIndex - 1;
+            const prevTopicWordCount = TOPIC_LIST[prevTopicIndex].vocabulary.length;
+            setCurrentTopicIndex(prevTopicIndex); 
+            setCurrentWordInTopicIndex(prevTopicWordCount - 1); 
+        }
+        else {
+            const lastTopicIndex = TOPIC_LIST.length - 1;
+            const lastTopicWordCount = TOPIC_LIST[lastTopicIndex].vocabulary.length;
+            setCurrentTopicIndex(lastTopicIndex); 
+            setCurrentWordInTopicIndex(lastTopicWordCount - 1); 
+        }
+    };
+    const handleSelectTopic = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const newTopicIndex = Number(e.target.value);
+        setCurrentTopicIndex(newTopicIndex);
+        setCurrentWordInTopicIndex(0); 
+        setFeedback(null);
+    };
+    const handleSelectWord = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const newWordIndex = Number(e.target.value);
+        setCurrentWordInTopicIndex(newWordIndex);
+        setFeedback(null);
+    };
+    const handleRandomWord = useCallback(() => {
+        const randomTopicIndex = Math.floor(Math.random() * TOPIC_LIST.length);
+        const randomTopic = TOPIC_LIST[randomTopicIndex];
+        const randomWordIndex = Math.floor(Math.random() * randomTopic.vocabulary.length);
+        setCurrentTopicIndex(randomTopicIndex);
+        setCurrentWordInTopicIndex(randomWordIndex);
+        setFeedback(null);
+        setIsProcessing(false);
+        setIsRecording(false);
+    }, []); 
+    // ---
+
+
+    // --- THÊM MỚI: Các hàm xử lý của Quiz Mode ---
+    const startQuiz = () => {
+        if (!account) {
+            setFeedback({ type: 'error', message: 'Vui lòng kết nối ví Sui để bắt đầu Quiz!' });
+            return;
+        }
+        setFeedback(null);
+        setQuizWords(selectRandomWords(QUIZ_LENGTH));
+        setCurrentQuizWordIndex(0);
+        setTimeLeft(QUIZ_TIME_LIMIT);
+        setGameMode('quiz');
+    };
+
+
+
+// --- SỬA LỖI: Viết lại hoàn toàn hàm handleClaimNft
+
+const handleClaimNft = useCallback(async () => {
+        if (!account) {
+            setFeedback({ type: 'error', message: 'Lỗi: Mất kết nối ví!' });
+            return;
+        }
+
+        setIsProcessing(true); // Bắt đầu xử lý
+        setFeedback({ type: 'info', message: 'Đang tạo ảnh NFT, vui lòng đợi...' });
+
+        try {
+            // --- BƯỚC 1: Gọi backend để tạo ảnh ---
+            const imageResponse = await fetch("/.netlify/functions/generateImage", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    topic: "Japaniz Quiz Champion" // Gửi một chủ đề chung
+                }),
+            });
+
+            if (!imageResponse.ok) {
+                throw new Error("Lỗi khi tạo ảnh NFT.");
+            }
+
+            const { imageUrl } = await imageResponse.json();
+
+            if (!imageUrl) {
+                 throw new Error("Không nhận được ảnh từ server.");
+            }
+
+            // --- BƯỚC 2: Chuẩn bị giao dịch Sui ---
+            setFeedback({ type: 'info', message: 'Ảnh đã sẵn sàng! Vui lòng ký giao dịch...' });
+
+            const txb = new Transaction();
+            
+            // Helper để chuyển string thành 'pure' vector<u8>
+            const pureVectorU8 = (str: string) => txb.pure(
+                bcs.vector(bcs.u8()).serialize(new TextEncoder().encode(str))
+            );
+
+            txb.moveCall({
+                target: `${PACKAGE_ID}::achievement::mint_achievement`,
+                arguments: [
+                    pureVectorU8("Japaniz Quiz Challenge"),
+                    txb.pure.u64(100),
+                    pureVectorU8(imageUrl),
+                    txb.pure.address(account.address),
+                ],
+            });
+
+            // --- BƯỚC 3: Yêu cầu người dùng ký (dùng flow 2-bước) ---
+            const { bytes, signature, reportTransactionEffects } = await signTransaction({
+                transaction: txb,
+            });
+            
+            setFeedback({ type: 'info', message: 'Đã ký! Đang gửi lên blockchain...' });
+
+            // --- BƯỚC 4: Thực thi giao dịch ---
+            const executeResult = await client.executeTransactionBlock({
+                transactionBlock: bytes,
+                signature,
+                options: {
+                    showRawEffects: true, // Bắt buộc
+                },
+            });
+
+            // --- BƯỚC 5: Báo cáo kết quả về ví ---
+            reportTransactionEffects(executeResult.rawEffects!);
+
+            // --- BƯỚC 6: Xử lý thành công ---
+            console.log('NFT Minted!', executeResult);
+            setFeedback({ type: 'correct', message: 'Nhận NFT thành công! Kiểm tra ví của bạn.' });
+            setTimeout(goToPracticeMode, 3000); 
+
+        } catch (error: any) {
+            console.error('Lỗi trong quá trình claim:', error);
+            setFeedback({ type: 'error', message: error.message || 'Lỗi không xác định' });
+            setIsProcessing(false);
+        }
+
+    }, [account, currentTopicIndex, signTransaction, client]); // THAY ĐỔI: dependencies
+    // ---
+
+    const goToPracticeMode = () => {
+        setFeedback(null);
+        setGameMode('practice');
+        setQuizWords([]);
+        setCurrentQuizWordIndex(0);
+        setTimeLeft(QUIZ_TIME_LIMIT);
+    };
+    // ---
+
+
     const feedbackColor = {
         correct: 'text-green-600 bg-green-100 border-green-500',
         incorrect: 'text-red-600 bg-red-100 border-red-500',
@@ -271,75 +541,276 @@ const App: React.FC = () => {
             <div className="w-full max-w-md mx-auto">
                 
                 <header className="flex justify-between items-center mb-6">
-                    <h1 className="text-2xl font-bold text-slate-700">Luyện phát âm</h1>
-                    <div className="bg-white rounded-full px-4 py-2 text-lg font-bold text-indigo-600 shadow-md">
-                        Điểm: {score}
+                    <h1 className="text-2xl font-bold text-slate-700">
+                        Luyện phát âm
+                    </h1>
+                    <div className="flex items-center gap-4">
+                        <div className="bg-white rounded-full px-4 py-2 text-lg font-bold text-indigo-600 shadow-md">
+                            Điểm: {score}
+                        </div>
+                        <ConnectButton />
                     </div>
                 </header>
+                
+                {/* --- SỬA ĐỔI: Giao diện điều khiển theo gameMode --- */}
+
+                {/* === CHẾ ĐỘ PRACTICE (LUYỆN TẬP) === */}
+                {gameMode === 'practice' && (
+                    <>
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label htmlFor="topic-select" className="block text-sm font-medium text-slate-700 mb-1">
+                                    Chủ đề
+                                </label>
+                                <select
+                                    id="topic-select"
+                                    value={currentTopicIndex}
+                                    onChange={handleSelectTopic}
+                                    className="w-full p-2 border border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    {TOPIC_LIST.map((topic, index) => (
+                                        <option key={index} value={index}>
+                                            {topic.topicName}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label htmlFor="word-select" className="block text-sm font-medium text-slate-700 mb-1">
+                                    Từ vựng
+                                </label>
+                                <select
+                                    id="word-select"
+                                    value={currentWordInTopicIndex}
+                                    onChange={handleSelectWord}
+                                    className="w-full p-2 border border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    {currentWordList.map((word, index) => (
+                                        <option key={index} value={index}>
+                                            {index + 1}. {word.japanese}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+                        <div className="mb-6 grid grid-cols-2 gap-4">
+                            <button
+                                onClick={handleRandomWord}
+                                disabled={isProcessing || isRecording}
+                                className="w-full flex items-center justify-center p-2 bg-indigo-600 text-white rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition-colors font-medium"
+                            >
+                                Từ ngẫu nhiên
+                            </button>
+                            <button
+                                onClick={startQuiz}
+                                disabled={isProcessing || isRecording || !account}
+                                className="w-full flex items-center justify-center p-2 bg-green-600 text-white rounded-md shadow-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 transition-colors font-medium"
+                                title={!account ? "Vui lòng kết nối ví để chơi Quiz" : "Bắt đầu thử thách"}
+                            >
+                                Bắt đầu Quiz (NFT)
+                            </button>
+                        </div>
+                    </>
+                )}
+
+                {/* === CHẾ ĐỘ QUIZ (ĐANG CHƠI) === */}
+                {(gameMode === 'quiz' || gameMode === 'quiz_failed') && (
+                    <div className="mb-6 bg-white rounded-2xl shadow-xl p-4 text-center">
+                        <div className="text-2xl font-bold text-red-600">
+                            Thời gian: {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, '0')}
+                        </div>
+                        <div className="text-lg font-medium text-slate-700 mt-2">
+                            Tiến độ: {currentQuizWordIndex + 1} / {QUIZ_LENGTH}
+                        </div>
+                        {gameMode === 'quiz_failed' && (
+                             <button
+                                onClick={goToPracticeMode}
+                                className="mt-4 w-full p-2 bg-gray-500 text-white rounded-md shadow-sm hover:bg-gray-600"
+                            >
+                                Quay lại Luyện tập
+                            </button>
+                        )}
+                    </div>
+                )}
+
+                {/* === CHẾ ĐỘ QUIZ PASSED (THẮNG) === */}
+                {gameMode === 'quiz_passed' && (
+                    <div className="mb-6 bg-green-100 border border-green-500 rounded-2xl shadow-xl p-4 text-center">
+                        <h2 className="text-2xl font-bold text-green-700">CHIẾN THẮNG!</h2>
+                        <p className="text-slate-700 mt-2">Bạn đã hoàn thành 10 từ trong thời gian quy định. Hãy nhận NFT!</p>
+                        <button
+                            onClick={handleClaimNft}
+                            disabled={isProcessing || !account}
+                            className="mt-4 w-full p-2 bg-purple-600 text-white rounded-md shadow-sm hover:bg-purple-700 disabled:opacity-50 font-medium"
+                        >
+                            {isProcessing ? "Đang xử lý..." : "Nhận NFT Thành Tích"}
+                        </button>
+                    </div>
+                )}
+                
+                {/* --- KẾT THÚC SỬA ĐỔI GIAO DIỆN --- */}
+
 
                 <main className="bg-white rounded-2xl shadow-xl p-6 md:p-8 text-center space-y-6">
-                    {/* Vocabulary Card */}
+                    {/* Vocabulary Card (Giữ nguyên) */}
                     <div className="relative">
-                        <p className="text-5xl md:text-6xl font-bold text-slate-800 mb-2" style={{ fontFamily: "'Noto Sans JP', sans-serif" }}>
-                            {currentWord.japanese}
-                        </p>
-                        <p className="text-2xl text-slate-600" style={{ fontFamily: "'Noto Sans JP', sans-serif" }}>
-                            {currentWord.hiragana}
-                        </p>
-                        <p className="text-xl text-slate-500">{currentWord.romaji}</p>
-                        <p className="text-lg font-medium text-indigo-600 mt-2">{currentWord.vietnamese}</p>
+                        <>
+                            <p className="text-5xl md:text-6xl font-bold text-slate-800 mb-2" style={{ fontFamily: "'Noto Sans JP', sans-serif" }}>
+                                {currentWord.japanese}
+                            </p>
+                            <p className="text-2xl text-slate-600" style={{ fontFamily: "'Noto Sans JP', sans-serif" }}>
+                                {currentWord.hiragana}
+                            </p>
+                            <p className="text-xl text-slate-500 mt-2">{currentWord.romaji}</p>
+                            <p className="text-lg font-medium text-indigo-600 mt-2">{currentWord.vietnamese}</p>
+                        </>
                         <button
                             onClick={handlePlayAudio}
                             disabled={isProcessing || isRecording}
                             className="absolute top-0 right-0 p-2 text-slate-500 hover:text-indigo-600 disabled:text-slate-300 transition-colors"
                             aria-label="Nghe phát âm mẫu"
-                         >
+                         >
                             <SpeakerIcon className="w-6 h-6" />
                         </button>
                     </div>
 
-                    {/* Feedback Display */}
+                    {/* Feedback Display (Giữ nguyên) */}
                     <div className="h-24 flex items-center justify-center p-2">
                         {feedback && (
                             <div key={feedback.message} className={`w-full p-3 rounded-lg border ${feedbackColor[feedback.type]} animate-fadeIn`}>
                                 <p className="font-medium">{feedback.message}</p>
                             </div>
-                        )}
+                        )}
                     </div>
                     
-                    {/* Controls */}
-                     <div className="flex items-center justify-center space-x-4 h-24">
-                        <button
-                            onClick={isRecording ? stopRecording : startRecording}
-                            disabled={isProcessing}
-                            className={`relative flex items-center justify-center w-24 h-24 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-offset-2 disabled:opacity-50
-                                ${isRecording
-                                    ? 'bg-red-500 text-white shadow-lg scale-110 focus:ring-red-400'
-                                      : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-md focus:ring-indigo-500'}`
-                            }
-                           >
-                            {isRecording && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>}
-                            <MicIcon className="w-10 h-10" />
-                        </button>
+                    {/* --- SỬA ĐỔI: Nút điều khiển theo gameMode --- */}
+                     <div className="flex items-center justify-center space-x-4 h-24">
                         
-                        {showNextButton && (
-                             <button
-                                   onClick={handleNextWord}
-                                className="flex items-center justify-center w-24 h-24 bg-green-500 text-white rounded-full shadow-md hover:bg-green-600 focus:outline-none focus:ring-4 focus:ring-green-400 focus:ring-offset-2 transition-all"
-                                aria-label="Từ tiếp theo"
-                             >
-                                <NextIcon className="w-10 h-10"/>
-                             </button>
-                        )}
+                        {/* Nút của Practice Mode */}
+                        {gameMode === 'practice' && (
+                            <>
+                                <button
+                                onClick={handlePrevWord}
+                                    disabled={isProcessing || isRecording}
+                                className="flex items-center justify-center w-20 h-20 bg-gray-300 text-slate-700 rounded-full shadow-md hover:bg-gray-400 focus:outline-none focus:ring-4 focus:ring-gray-300 focus:ring-offset-2 transition-all disabled:opacity-50"
+                                aria-label="Từ phía trước"
+                            >
+                                <PrevIcon className="w-8 h-8"/>
+                            </button>
+                            <button
+                                onClick={isRecording ? stopRecording : startRecording}
+                                disabled={isProcessing}
+                                className={`relative flex items-center justify-center w-24 h-24 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-offset-2 disabled:opacity-50
+                                    ${isRecording ? 'bg-red-500 text-white shadow-lg scale-110 focus:ring-red-400' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-md focus:ring-indigo-500'}`}
+                               >
+                                {isRecording && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>}
+                                <MicIcon className="w-10 h-10" />
+                            </button>
+                            <button
+                                onClick={handleNextWord}
+                                    disabled={isProcessing || isRecording}
+                                className="flex items-center justify-center w-20 h-20 bg-green-500 text-white rounded-full shadow-md hover:bg-green-600 focus:outline-none focus:ring-4 focus:ring-green-400 focus:ring-offset-2 transition-all disabled:opacity-50"
+                                aria-label="Từ tiếp theo"
+                            >
+                                <NextIcon className="w-8 h-8"/>
+                            </button>
+                            </>
+                        )}
+
+                        {/* Nút của Quiz Mode */}
+                        {(gameMode === 'quiz' || gameMode === 'quiz_failed') && (
+                            <button
+                                onClick={isRecording ? stopRecording : startRecording}
+                                disabled={isProcessing || gameMode === 'quiz_failed'}
+                                className={`relative flex items-center justify-center w-24 h-24 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-offset-2 disabled:opacity-50
+                                ${isRecording ? 'bg-red-500 text-white shadow-lg scale-110 focus:ring-red-400' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-md focus:ring-indigo-500'}`}
+                           >
+                                {isRecording && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>}
+                                <MicIcon className="w-10 h-10" />
+                        </button>
+                        )}
                     </div>
 
                 </main>
+                
+                {/* Component hiển thị ví (Giữ nguyên) */}
+                <div className="bg-white rounded-2xl shadow-xl p-6 md:p-8 mt-6">
+                    <ConnectedAccount />
+                </div>
+
                 <footer className="text-center mt-6 text-slate-500 text-sm">
                     <p>Google Gemini & ElevenLabs API</p>
-                 </footer>
-               </div>
+                 </footer>
+               </div>
         </div>
     );
 };
+
+
+// Component hiển thị thông tin ví (Giữ nguyên)
+function ConnectedAccount() {
+    const account = useCurrentAccount();
+    if (!account) {
+        return (
+            <div>
+                <h2 className="text-xl font-bold text-slate-700 mb-2">
+                    Kết nối Ví Sui
+                </h2>
+                <p className="text-slate-600">
+                    Vui lòng kết nối ví của bạn ở góc trên bên phải để xem thông tin và chơi Quiz.
+                </p>
+            </div>
+        );
+    }
+    return (
+        <div>
+            <h2 className="text-xl font-bold text-slate-700 mb-2">
+                Ví đã kết nối
+            </h2>
+            <p className="text-slate-600" style={{ wordWrap: 'break-word' }}>
+                Địa chỉ: {account.address}
+            </p>
+            <hr className="my-4" />
+            <h3 className="text-lg font-semibold text-slate-700 mb-2">
+                NFT Thành Tích (trên Testnet):
+            </h3>
+            <OwnedObjects address={account.address} />
+        </div>
+    );
+}
+
+// Component hiển thị vật phẩm (Giữ nguyên)
+function OwnedObjects({ address }: { address: string }) {
+    const { data, isPending, error } = useSuiClientQuery('getOwnedObjects', {
+        owner: address,
+        // --- THÊM MỚI: Lọc để chỉ hiển thị NFT của bạn ---
+        // (Sử dụng cấu trúc Type của NFT: PackageID::module::Struct)
+        filter: { StructType: `${PACKAGE_ID}::achievement::JapanizAchievement` },
+        options: { showDisplay: true }, // Yêu cầu hiển thị metadata
+    });
+
+    if (isPending) {
+        return <div>Đang tải NFT...</div>;
+    }
+    if (error) {
+        return <div>Lỗi tải NFT: {error.message}</div>;
+    }
+    if (!data || data.data.length === 0) {
+        return <div>Bạn chưa có NFT thành tích nào. Hãy thắng Quiz!</div>;
+    }
+    return (
+        <ul
+            className="list-disc list-inside h-40 overflow-y-auto"
+            style={{ fontFamily: 'monospace', wordWrap: 'break-word' }}
+        >
+            {data.data.map((object) => (
+                <li key={object.data?.objectId}>
+                    {/* Hiển thị tên từ metadata nếu có */}
+                    {object.data?.display?.data?.name || object.data?.objectId}
+                </li>
+            ))}
+        </ul>
+    );
+}
 
 export default App;

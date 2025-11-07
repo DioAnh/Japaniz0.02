@@ -12,5 +12,11 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "type": "commonjs",
+  "dependencies": {
+    "@mysten/dapp-kit": "^0.19.8",
+    "@mysten/sui": "^1.44.0",
+    "@tanstack/react-query": "^5.90.6",
+    "node-fetch": "^3.3.2"
+  }
 }

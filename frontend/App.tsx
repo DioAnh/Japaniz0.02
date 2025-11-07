@@ -45,7 +45,7 @@ const PrevIcon = ({ className }: { className?: string }) => (
 // !!! QUAN TRỌNG: Hãy thay thế bằng Package ID của bạn sau khi deploy contract
 const PACKAGE_ID = "0xfa078f15e1f310cb59371a29d3da4e4a5f621b9e9e6aa196bff4a9934b866697"; 
 const QUIZ_TIME_LIMIT = 120; // 120 giây = 2 phút
-const QUIZ_LENGTH = 1; // 10 từ
+const QUIZ_LENGTH = 10; // 10 từ
 // ---
 
 // --- Audio Utility Functions ---

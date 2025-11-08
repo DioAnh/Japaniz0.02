@@ -14,7 +14,7 @@ import {
 // --- THÊM MỚI: Class TransactionBlock của Sui ---
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
-
+import { TransactionBlock } from '@mysten/sui.js/transactions'; 
 
 
 // --- SVG Icons ---
@@ -41,11 +41,17 @@ const PrevIcon = ({ className }: { className?: string }) => (
     </svg>
 );
 
+
+
 // --- THÊM MỚI: Cấu hình Quiz và NFT ---
 // !!! QUAN TRỌNG: Hãy thay thế bằng Package ID của bạn sau khi deploy contract
-const PACKAGE_ID = "0xfa078f15e1f310cb59371a29d3da4e4a5f621b9e9e6aa196bff4a9934b866697"; 
-const QUIZ_TIME_LIMIT = 120; // 120 giây = 2 phút
-const QUIZ_LENGTH = 10; // 10 từ
+const PACKAGE_ID = "0x7390eda149bea5fb0256f78abd331e9ecefd9dea3ecfbaf38487757a6d49eb0f";
+const ADMIN_ADDRESS = "0xa9008f618a6885e6d5ab99eb1173ddbca23c4368b146ccf3d5f32be1e8181b46"; 
+const QUIZ_TIME_LIMIT = 120;
+const MIZU_TREASURY_CAP_ID = "0x1d6e35eb94f74318f78572b8c6b80e53ed5a80c28ee5947b84478f049399fadc";
+const QUIZ_LENGTH = 1; // 10 từ
+const POINTS_TO_CLAIM_MIZU = 30;
+const TEMP_TICKET_ID = "0x0000000000000000000000000000000000000000000000000000000000000000"; 
 // ---
 
 // --- Audio Utility Functions ---
@@ -109,6 +115,9 @@ const App: React.FC = () => {
     const [isRecording, setIsRecording] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
 
+    // Dùng cho nút Claim
+    const [isClaiming, setIsClaiming] = useState(false);
+
     // --- THÊM MỚI: State cho Quiz Mode ---
     type GameMode = 'practice' | 'quiz' | 'quiz_failed' | 'quiz_passed';
     const [gameMode, setGameMode] = useState<GameMode>('practice');
@@ -126,7 +135,72 @@ const App: React.FC = () => {
     const account = useCurrentAccount();
     const client = useSuiClient(); // Thêm dòng này
     const { mutateAsync: signTransaction } = useSignTransaction(); // Sửa hook và tên biến
+
+
+    const handleMintTicket = () => {
+    if (!account || account.address !== ADMIN_ADDRESS) {
+        alert("Chức năng chỉ dành cho Admin!");
+        return;
+    }
     
+    // Bắt đầu xử lý
+    setFeedback({ type: 'info', message: 'ADMIN: Đang tạo vé NFT, vui lòng ký...' });
+    
+    // Dùng Transaction mới
+    const txb = new Transaction(); 
+
+    // 1. Gọi hàm mint_event_ticket
+    const newTicket = txb.moveCall({
+        target: `${PACKAGE_ID}::ticketnft::mint_event_ticket`,
+        arguments: [
+            txb.pure.string("Summer Event 2026"), // Tên vé
+            txb.pure.string("https://chocolate-high-aardvark-770.mypinata.cloud/ipfs/bafybeices7ku37fvsisiwm7y7guxl5zokl7zbhnvc6nervmfivi364tmym"), // Link ảnh
+        ],
+    });
+
+    // 2. Chuyển NFT về ví Admin
+    // Dùng txb.transfer cho Transaction mới
+    txb.transferObjects([newTicket], txb.pure.address(ADMIN_ADDRESS));
+
+    // Thực thi giao dịch (dùng flow 2 bước: signTransaction + executeTransactionBlock)
+    signTransaction({
+        transaction: txb, 
+    }, {
+        onSuccess: async (result) => {
+            // Chuyển sang execute (như trong tài liệu Sui)
+            const executeResult = await client.executeTransactionBlock({
+                transactionBlock: result.bytes,
+                signature: result.signature,
+                options: {
+                    showRawEffects: true,
+                },
+            });
+
+            console.log("Mint NFT thành công!", executeResult);
+            alert("Mint NFT thành công! Kiểm tra console để xem chi tiết Object ID.");
+
+            // LOGIC QUAN TRỌNG: Tìm Object ID của NFT mới tạo
+            const newObject = executeResult.objectChanges?.find(
+                (change) => change.type === "created" && change.objectType.includes("EventTicket")
+            );
+            if (newObject && 'objectId' in newObject) {
+                console.log("=========================================");
+                console.log("ID VÉ NFT MỚI (Cần dùng cho App.tsx):", newObject.objectId);
+                console.log("=========================================");
+            }
+            setFeedback(null);
+        },
+        onError: (error) => {
+            console.error("Mint NFT thất bại:", error);
+            alert(`Mint NFT thất bại: ${error.message}`);
+            setFeedback(null);
+        },
+    });
+};
+    
+
+
+
     // --- SỬA ĐỔI: 'currentWord' giờ phụ thuộc vào gameMode ---
     const currentWord = useMemo(() => {
         if (gameMode === 'quiz' || gameMode === 'quiz_failed') {
@@ -519,6 +593,153 @@ const handleClaimNft = useCallback(async () => {
     }, [account, currentTopicIndex, signTransaction, client]); // THAY ĐỔI: dependencies
     // ---
 
+
+// --- THÊM MỚI: Hàm Claim 1 MIZU ---
+    const handleClaimMizu = useCallback(async () => {
+        if (!account) {
+            setFeedback({ type: 'error', message: 'Lỗi: Vui lòng kết nối ví!' });
+            return;
+        }
+        
+        // 1. Kiểm tra điểm
+        if (score < POINTS_TO_CLAIM_MIZU) {
+            setFeedback({ type: 'error', message: `Bạn cần ${POINTS_TO_CLAIM_MIZU} điểm để đổi 1 MIZU!` });
+            return;
+        }
+
+        setIsClaiming(true);
+        setFeedback({ type: 'info', message: 'Đang đổi 1 MIZU, vui lòng ký giao dịch...' });
+
+        try {
+            const txb = new Transaction();
+            
+            // Thêm TreasuryCap (Shared Object) vào giao dịch
+            const treasuryCapArg = txb.object(MIZU_TREASURY_CAP_ID);
+
+            txb.moveCall({
+                target: `${PACKAGE_ID}::mizucoin::claim`,
+                arguments: [
+                    treasuryCapArg, // treasury_cap: &mut TreasuryCap
+                    // ctx được tự động thêm vào
+                ],
+            });
+
+            // 2. Yêu cầu ký
+            const { bytes, signature, reportTransactionEffects } = await signTransaction({
+                transaction: txb,
+            });
+            
+            setFeedback({ type: 'info', message: 'Đã ký! Đang gửi...' });
+
+            // 3. Thực thi
+            const executeResult = await client.executeTransactionBlock({
+                transactionBlock: bytes,
+                signature,
+                options: { showRawEffects: true },
+            });
+            reportTransactionEffects(executeResult.rawEffects!);
+
+            // 4. Thành công: Trừ điểm!
+            console.log('Claimed MIZU!', executeResult);
+            setFeedback({ type: 'correct', message: 'Nhận 1 MIZU thành công!' });
+            setScore(s => s - POINTS_TO_CLAIM_MIZU); // Trừ điểm
+            setIsClaiming(false);
+
+        } catch (error: any) {
+            console.error('Lỗi Claim MIZU:', error);
+            setFeedback({ type: 'error', message: error.message || 'Lỗi không xác định' });
+            setIsClaiming(false);
+        }
+
+    }, [account, signTransaction, client, score]); // Thêm 'score' vào dependency
+    // ---
+
+
+
+// --- THÊM MỚI: Hàm Mua Ticket NFT
+
+    const handleBuyTicket = useCallback(async () => {
+    if (!account) {
+        setFeedback({ type: 'error', message: 'Vui lòng kết nối ví!' });
+        return;
+    }
+    
+    // Giá vé là 10 MIZU (tức 10 tỷ MIST)
+    // LƯU Ý: Vì bạn chỉ có 1 MIZU (1 tỷ MIST), bạn CẦN ít nhất 10 MIZU 
+    // để mua vé. Nếu không, giao dịch sẽ THẤT BẠI vì 'Insufficient balance'.
+    const MIZU_PRICE = 1 * 1_000_000_000; 
+    const TICKET_ID = TEMP_TICKET_ID; // Dùng ID vé Admin đã mint
+
+    if (TICKET_ID === "0x0000000000000000000000000000000000000000000000000000000000000000") {
+        setFeedback({ type: 'error', message: 'Lỗi: Admin chưa thiết lập ID vé NFT.' });
+        return;
+    }
+
+    setIsClaiming(true);
+    setFeedback({ type: 'info', message: 'Đang mua vé (10 MIZU), vui lòng ký giao dịch...' });
+
+    try {
+        // --- BƯỚC 1: LẤY VẬT PHẨM COIN MIZU ---
+        const mizuCoinType = `${PACKAGE_ID}::mizucoin::MIZUCOIN`;
+        const coinResponse = await client.getCoins({
+            owner: account.address,
+            coinType: mizuCoinType,
+        });
+
+        if (!coinResponse.data || coinResponse.data.length === 0) {
+            throw new Error("Không tìm thấy Coin MIZU để thanh toán.");
+        }
+        
+        // Lấy ID của Coin MIZU đầu tiên (Object ID)
+        const coinToSplitId = coinResponse.data[0].coinObjectId;
+        
+        // --- BƯỚC 2: TẠO TRANSACTION BLOCK ---
+        const txb = new Transaction();
+        
+        // 1. TẠO OBJECT TỪ ID
+        const coinObject = txb.object(coinToSplitId);
+        
+        // 2. CHIA NHỎ COIN: Lấy chính xác 10 MIZU
+        // (Nếu số dư nhỏ hơn MIZU_PRICE, lỗi sẽ xảy ra ở đây)
+        const [paymentCoin] = txb.splitCoin(
+             coinObject, 
+             MIZU_PRICE
+        );
+
+        // 3. GỌI HÀM MOVE
+        txb.moveCall({
+            target: `${PACKAGE_ID}::ticketnft::purchase_ticket`,
+            arguments: [
+                txb.object(TICKET_ID), // 1. ticket: EventTicket (ID Admin đã mint)
+                paymentCoin,          // 2. payment: Coin<MIZUCOIN> (Vật phẩm vừa split)
+            ],
+        });
+
+        // --- BƯỚC 4: Ký và Thực thi ---
+        const { bytes, signature } = await signTransaction({ transaction: txb });
+        
+        setFeedback({ type: 'info', message: 'Đã ký! Đang gửi lên blockchain...' });
+
+        const executeResult = await client.executeTransactionBlock({
+            transactionBlock: bytes, signature, options: { showRawEffects: true },
+        });
+        
+        reportTransactionEffects(executeResult.rawEffects!);
+        console.log('Mua vé thành công!', executeResult);
+        setFeedback({ type: 'correct', message: 'Mua vé thành công! Kiểm tra NFT của bạn.' });
+        setIsClaiming(false);
+
+    } catch (error: any) {
+        console.error('Lỗi Mua Vé:', error);
+        setFeedback({ 
+            type: 'error', 
+            message: `Lỗi mua vé: ${(error.message || 'Lỗi không xác định').substring(0, 100)}` 
+        });
+        setIsClaiming(false);
+    }
+}, [account, client, signTransaction]);
+
+
     const goToPracticeMode = () => {
         setFeedback(null);
         setGameMode('practice');
@@ -536,7 +757,9 @@ const handleClaimNft = useCallback(async () => {
         error: 'text-yellow-600 bg-yellow-100 border-yellow-500',
     };
 
-    return (
+
+
+    return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-4">
             <div className="w-full max-w-md mx-auto">
                 
@@ -544,10 +767,23 @@ const handleClaimNft = useCallback(async () => {
                     <h1 className="text-2xl font-bold text-slate-700">
                         Luyện phát âm
                     </h1>
-                    <div className="flex items-center gap-4">
+                    {/* SỬA: Thêm nút Claim MIZU */}
+                    <div className="flex items-center gap-2">
                         <div className="bg-white rounded-full px-4 py-2 text-lg font-bold text-indigo-600 shadow-md">
                             Điểm: {score}
                         </div>
+                        <MizuBalance />
+                        <button
+                            onClick={handleClaimMizu}
+                            disabled={score < POINTS_TO_CLAIM_MIZU || isClaiming || !account}
+                            className="px-3 py-2 bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                            title={
+                                !account ? "Kết nối ví để đổi điểm" :
+                                score < POINTS_TO_CLAIM_MIZU ? `Cần ${POINTS_TO_CLAIM_MIZU} điểm` : "Đổi 1000 điểm lấy 1 MIZU"
+                            }
+                        >
+                            {isClaiming ? "..." : "Đổi MIZU"}
+                        </button>
                         <ConnectButton />
                     </div>
                 </header>
@@ -557,6 +793,19 @@ const handleClaimNft = useCallback(async () => {
                 {/* === CHẾ ĐỘ PRACTICE (LUYỆN TẬP) === */}
                 {gameMode === 'practice' && (
                     <>
+                        {/* THÊM NÚT ADMIN MINTING TẠM THỜI Ở ĐÂY */}
+                        {account?.address === ADMIN_ADDRESS && (
+                            <div className="mb-4">
+                                <button
+                                    onClick={handleMintTicket}
+                                    className="w-full flex items-center justify-center p-2 bg-red-600 text-white rounded-md shadow-sm hover:bg-red-700 disabled:opacity-50 transition-colors font-medium"
+                                    title="Tạo NFT Ticket để người dùng có thể mua"
+                                >
+                                    ADMIN: Mint Vé Sự Kiện (EventTicket)
+                                </button>
+                            </div>
+                        )}
+                        {/* KẾT THÚC THÊM NÚT ADMIN MINTING */}
                         <div className="grid grid-cols-2 gap-4 mb-4">
                             <div>
                                 <label htmlFor="topic-select" className="block text-sm font-medium text-slate-700 mb-1">
@@ -812,5 +1061,38 @@ function OwnedObjects({ address }: { address: string }) {
         </ul>
     );
 }
+
+
+
+const MIST_PER_MIZU = 1_000_000_000; 
+
+function MizuBalance() {
+    const account = useCurrentAccount();
+    // Lệnh query để lấy số dư Coin MIZU của địa chỉ
+    const { data, isPending, error } = useSuiClientQuery('getBalance', {
+        owner: account?.address || '',
+        coinType: `${PACKAGE_ID}::mizucoin::MIZUCOIN`,
+    }, {
+        // Chỉ chạy query khi có tài khoản
+        enabled: !!account,
+        refetchInterval: 10000, // Cập nhật sau mỗi 10 giây
+    });
+
+    if (!account) return null;
+    if (isPending) return <div className="text-sm px-4 py-2">Đang tải MIZU...</div>;
+    if (error) return <div className="text-sm text-red-500 px-4 py-2">Lỗi tải coin</div>;
+
+    // Tính toán số MIZU (tổng MIST / 1 tỷ)
+    const balance = Number(data.totalBalance);
+    const mizuAmount = balance / MIST_PER_MIZU;
+
+    return (
+        <div className="bg-yellow-100 rounded-full px-4 py-2 text-lg font-bold text-yellow-800 shadow-md">
+            MIZU: {mizuAmount.toFixed(2)}
+        </div>
+    );
+}
+
+
 
 export default App;
